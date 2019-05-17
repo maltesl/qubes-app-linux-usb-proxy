@@ -2,6 +2,7 @@
 
 SYS_USB_DEVICES=/sys/bus/usb/devices
 SYS_USBIP_HOST=/sys/bus/usb/drivers/usbip-host
+SYS_USB_AUTOPROBE=/sys/bus/usb/drivers_autoprobe
 
 # From /usr/include/linux/usbip.h
 SDEV_ST_AVAILABLE=1
@@ -90,13 +91,29 @@ if [ -d "$devpath/driver" ]; then
     echo $busid > $devpath/driver/unbind || exit 1
 fi
 
+# In order to prevent other drivers from being loaded automatically, the device
+# might be deauthorized.
+# Before authorizing it again, we disable drivers_autoprobe to make sure no
+# other driver can bind to it until usbip-host has been bound to the device.
+autoprobe_setting="$(cat $SYS_USB_AUTOPROBE)"
+echo 0 > $SYS_USB_AUTOPROBE
+
+# Authorize the device, if it was not authorized.
+authorized_setting="$(cat $devpath/authorized)"
+echo 1 > $devpath/authorized
+
 # Bind to the usbip-host driver
 echo -n add $busid > $SYS_USBIP_HOST/match_busid || exit 1
 echo $busid > $SYS_USBIP_HOST/bind || exit 1
 
+# Restore drivers_autoprobe setting.
+echo "$autoprobe_setting" > $SYS_USB_AUTOPROBE
+
 # One more safety check - make sure the device is available
 if [ "$(cat $devpath/usbip_status)" -ne $SDEV_ST_AVAILABLE ]; then
     echo "Device $devpath not available!" >&2
+    # Restore device authorization
+    echo "$authorized_setting" > $devpath/authorized
     exit 1
 fi
 
@@ -118,6 +135,13 @@ cleanup() {
     qubesdb-rm \
         /qubes-usb-devices/${safe_busid}/connected-to \
         /qubes-usb-devices/${safe_busid}/x-pid
+    # Restore device authorization.
+    # One reason the device could not be in use by usbip-host anymore is that
+    # the device got removed, which would mean $devpath/authorized does not
+    # exist anymore, so we check before writing to it.
+    if [ -f $devpath/authorized ]; then
+        echo "$authorized_setting" > $devpath/authorized
+    fi
     exit
 }
 trap "cleanup" EXIT TERM
